@@ -1,55 +1,76 @@
 import streamlit as st
-from langchain.document_loaders import TextLoader, PyMuPDFLoader, Docx2txtLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.vectorstores import FAISS
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.chains import RetrievalQA
-from langchain.chat_models import ChatOpenAI
 import os
-import tempfile
+import requests
+from sentence_transformers import SentenceTransformer
+import faiss
+import PyPDF2
+import docx
+from io import StringIO
 
-# Set API key
-os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+st.set_page_config(page_title="RAG with Hugging Face", layout="wide")
+
+# Load Hugging Face API key
+HF_TOKEN = st.secrets["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"]
+API_URL = "https://api-inference.huggingface.co/models/deepset/roberta-base-squad2"
+headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+
+# Hugging Face QA
+def ask_question(question, context):
+    payload = {
+        "inputs": {
+            "question": question,
+            "context": context
+        }
+    }
+    response = requests.post(API_URL, headers=headers, json=payload)
+    if response.status_code == 200:
+        return response.json().get("answer", "No answer found.")
+    else:
+        return "Failed to get answer from Hugging Face."
+
+# Document Parsing
+def extract_text(file):
+    if file.name.endswith(".pdf"):
+        reader = PyPDF2.PdfReader(file)
+        return " ".join([page.extract_text() for page in reader.pages if page.extract_text()])
+    elif file.name.endswith(".docx"):
+        doc = docx.Document(file)
+        return "\n".join([para.text for para in doc.paragraphs])
+    elif file.name.endswith(".txt"):
+        return StringIO(file.getvalue().decode()).read()
+    return ""
+
+# Chunking
+def split_text(text, chunk_size=500):
+    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
+
+# Embedding
+@st.cache_resource
+def embed_chunks(chunks):
+    model = SentenceTransformer("all-MiniLM-L6-v2")
+    embeddings = model.encode(chunks)
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(embeddings)
+    return index, embeddings, chunks
 
 # UI
-st.set_page_config(page_title="RAG Chat App", layout="wide")
-st.title("📄 Chat with Your Documents using RAG")
+st.title("📚 Chat With Your Documents (Hugging Face RAG)")
+uploaded_files = st.file_uploader("Upload documents (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
-uploaded_files = st.file_uploader("Upload PDF, DOCX, or TXT files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
-query = st.text_input("Ask a question about the uploaded documents:")
-
-if uploaded_files and query:
-    docs = []
+if uploaded_files:
+    all_text = ""
     for file in uploaded_files:
-        suffix = os.path.splitext(file.name)[-1].lower()
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(file.read())
-            tmp_path = tmp.name
+        all_text += extract_text(file) + "\n"
 
-        if suffix == ".pdf":
-            loader = PyMuPDFLoader(tmp_path)
-        elif suffix == ".docx":
-            loader = Docx2txtLoader(tmp_path)
-        elif suffix == ".txt":
-            loader = TextLoader(tmp_path)
-        else:
-            st.warning(f"Unsupported file type: {suffix}")
-            continue
+    text_chunks = split_text(all_text)
+    index, embeddings, chunks = embed_chunks(text_chunks)
 
-        docs.extend(loader.load())
+    st.success("Documents processed. Ask your question below.")
 
-    # Chunk & Embed
-    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-    chunks = splitter.split_documents(docs)
-
-    embeddings = OpenAIEmbeddings()
-    vectorstore = FAISS.from_documents(chunks, embeddings)
-
-    # RetrievalQA
-    retriever = vectorstore.as_retriever()
-    qa = RetrievalQA.from_chain_type(llm=ChatOpenAI(temperature=0), retriever=retriever)
-
-    # Response
-    response = qa.run(query)
-    st.markdown("### 📌 Answer:")
-    st.success(response)
+    user_query = st.text_input("Ask a question about the documents:")
+    if user_query:
+        query_embed = SentenceTransformer("all-MiniLM-L6-v2").encode([user_query])
+        D, I = index.search(query_embed, k=3)
+        top_chunks = "\n".join([chunks[i] for i in I[0]])
+        answer = ask_question(user_query, top_chunks)
+        st.markdown(f"**Answer:** {answer}")
