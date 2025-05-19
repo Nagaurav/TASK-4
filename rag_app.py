@@ -1,76 +1,87 @@
 import streamlit as st
 import os
-import requests
+import tempfile
+
+from transformers import pipeline
 from sentence_transformers import SentenceTransformer
 import faiss
 import PyPDF2
 import docx
-from io import StringIO
+import fitz  # PyMuPDF
 
-st.set_page_config(page_title="RAG with Hugging Face", layout="wide")
-
-# Load Hugging Face API key
+# Load Hugging Face API token
 HF_TOKEN = st.secrets["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"]
-API_URL = "https://api-inference.huggingface.co/models/deepset/roberta-base-squad2"
-headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+os.environ["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"] = HF_TOKEN
 
-# Hugging Face QA
-def ask_question(question, context):
-    payload = {
-        "inputs": {
-            "question": question,
-            "context": context
-        }
-    }
-    response = requests.post(API_URL, headers=headers, json=payload)
-    if response.status_code == 200:
-        return response.json().get("answer", "No answer found.")
-    else:
-        return "Failed to get answer from Hugging Face."
+st.title("📄 Chat with Your Documents (RAG App)")
 
-# Document Parsing
-def extract_text(file):
-    if file.name.endswith(".pdf"):
-        reader = PyPDF2.PdfReader(file)
-        return " ".join([page.extract_text() for page in reader.pages if page.extract_text()])
-    elif file.name.endswith(".docx"):
-        doc = docx.Document(file)
-        return "\n".join([para.text for para in doc.paragraphs])
-    elif file.name.endswith(".txt"):
-        return StringIO(file.getvalue().decode()).read()
-    return ""
+# File uploader
+uploaded_files = st.file_uploader("Upload Documents", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
-# Chunking
-def split_text(text, chunk_size=500):
-    return [text[i:i + chunk_size] for i in range(0, len(text), chunk_size)]
-
-# Embedding
+# Load models
 @st.cache_resource
-def embed_chunks(chunks):
-    model = SentenceTransformer("all-MiniLM-L6-v2")
-    embeddings = model.encode(chunks)
-    index = faiss.IndexFlatL2(embeddings.shape[1])
+def load_models():
+    embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    rag_pipeline = pipeline("question-answering", model="deepset/roberta-base-squad2", tokenizer="deepset/roberta-base-squad2")
+    return embedder, rag_pipeline
+
+embedder, rag_pipeline = load_models()
+
+# Document parsing
+def parse_file(file):
+    text = ""
+    if file.type == "application/pdf":
+        pdf = fitz.open(stream=file.read(), filetype="pdf")
+        for page in pdf:
+            text += page.get_text()
+    elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        doc = docx.Document(file)
+        for para in doc.paragraphs:
+            text += para.text + "\n"
+    elif file.type == "text/plain":
+        text = file.read().decode()
+    return text
+
+# Embed documents and build FAISS index
+def build_vector_store(text_chunks):
+    embeddings = embedder.encode(text_chunks)
+    dim = embeddings[0].shape[0]
+    index = faiss.IndexFlatL2(dim)
     index.add(embeddings)
-    return index, embeddings, chunks
+    return index, embeddings
 
-# UI
-st.title("📚 Chat With Your Documents (Hugging Face RAG)")
-uploaded_files = st.file_uploader("Upload documents (PDF, DOCX, TXT)", type=["pdf", "docx", "txt"], accept_multiple_files=True)
+# Chunking helper
+def chunk_text(text, chunk_size=500):
+    words = text.split()
+    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
 
+# Process uploaded files
+all_chunks = []
+file_sources = []
 if uploaded_files:
-    all_text = ""
     for file in uploaded_files:
-        all_text += extract_text(file) + "\n"
+        raw_text = parse_file(file)
+        chunks = chunk_text(raw_text)
+        all_chunks.extend(chunks)
+        file_sources.extend([file.name] * len(chunks))
 
-    text_chunks = split_text(all_text)
-    index, embeddings, chunks = embed_chunks(text_chunks)
+    index, embeddings = build_vector_store(all_chunks)
+    st.success(f"{len(all_chunks)} chunks indexed from {len(uploaded_files)} documents.")
 
-    st.success("Documents processed. Ask your question below.")
+# Chat interface
+if uploaded_files:
+    query = st.text_input("Ask a question about your documents:")
+    if query:
+        query_vec = embedder.encode([query])
+        D, I = index.search(query_vec, k=5)
+        retrieved_docs = [all_chunks[i] for i in I[0]]
 
-    user_query = st.text_input("Ask a question about the documents:")
-    if user_query:
-        query_embed = SentenceTransformer("all-MiniLM-L6-v2").encode([user_query])
-        D, I = index.search(query_embed, k=3)
-        top_chunks = "\n".join([chunks[i] for i in I[0]])
-        answer = ask_question(user_query, top_chunks)
-        st.markdown(f"**Answer:** {answer}")
+        context = "\n".join(retrieved_docs)
+        result = rag_pipeline(question=query, context=context)
+
+        st.subheader("💬 Answer")
+        st.write(result['answer'])
+
+        with st.expander("🔍 Retrieved Passages"):
+            for passage in retrieved_docs:
+                st.markdown(f"- {passage}")
