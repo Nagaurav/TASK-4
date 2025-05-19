@@ -2,48 +2,54 @@ import streamlit as st
 from langchain.document_loaders import TextLoader, PyMuPDFLoader, Docx2txtLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import FAISS
-from langchain.embeddings.openai import OpenAIEmbeddings
-from langchain.llms import OpenAI
-import tempfile
+from langchain.embeddings import OpenAIEmbeddings
+from langchain.chains import RetrievalQA
+from langchain.chat_models import ChatOpenAI
 import os
+import tempfile
 
-st.set_page_config(page_title="RAG Chat", layout="wide")
-st.title("📄 Retrieval-Augmented Generation (RAG) Chat")
+# Set API key
+os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+
+# UI
+st.set_page_config(page_title="RAG Chat App", layout="wide")
+st.title("📄 Chat with Your Documents using RAG")
 
 uploaded_files = st.file_uploader("Upload PDF, DOCX, or TXT files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
+query = st.text_input("Ask a question about the uploaded documents:")
 
-if uploaded_files:
-    st.info("Processing documents...")
-    raw_text = ""
+if uploaded_files and query:
+    docs = []
     for file in uploaded_files:
-        suffix = file.name.split('.')[-1]
-        with tempfile.NamedTemporaryFile(delete=False, suffix="." + suffix) as tmp:
+        suffix = os.path.splitext(file.name)[-1].lower()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
             tmp.write(file.read())
             tmp_path = tmp.name
 
-        if suffix == "pdf":
+        if suffix == ".pdf":
             loader = PyMuPDFLoader(tmp_path)
-        elif suffix == "docx":
+        elif suffix == ".docx":
             loader = Docx2txtLoader(tmp_path)
-        else:
+        elif suffix == ".txt":
             loader = TextLoader(tmp_path)
+        else:
+            st.warning(f"Unsupported file type: {suffix}")
+            continue
 
-        docs = loader.load()
-        raw_text += "\n".join([doc.page_content for doc in docs])
-        os.unlink(tmp_path)
+        docs.extend(loader.load())
 
-    splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    chunks = splitter.create_documents([raw_text])
+    # Chunk & Embed
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    chunks = splitter.split_documents(docs)
+
     embeddings = OpenAIEmbeddings()
-    db = FAISS.from_documents(chunks, embeddings)
-    st.success("Documents ready. Ask your question below.")
+    vectorstore = FAISS.from_documents(chunks, embeddings)
 
-    query = st.text_input("Ask something about the uploaded documents:")
+    # RetrievalQA
+    retriever = vectorstore.as_retriever()
+    qa = RetrievalQA.from_chain_type(llm=ChatOpenAI(temperature=0), retriever=retriever)
 
-    if query:
-        docs = db.similarity_search(query, k=3)
-        context = "\n\n".join([doc.page_content for doc in docs])
-        llm = OpenAI()
-        response = llm(f"Context:\n{context}\n\nQuestion: {query}\nAnswer:")
-        st.markdown("**Answer:**")
-        st.write(response)
+    # Response
+    response = qa.run(query)
+    st.markdown("### 📌 Answer:")
+    st.success(response)
