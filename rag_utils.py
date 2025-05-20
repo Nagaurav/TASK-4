@@ -1,20 +1,17 @@
-import os
-import fitz  # PyMuPDF
 import PyPDF2
 import docx
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-import tempfile
 
 model = SentenceTransformer("all-MiniLM-L6-v2")
-index = faiss.IndexFlatL2(384)  # 384 dim for MiniLM
+index = faiss.IndexFlatL2(384)
 documents = []
 
 def extract_text(file):
     if file.type == "application/pdf":
         reader = PyPDF2.PdfReader(file)
-        return "\n".join(page.extract_text() for page in reader.pages)
+        return "\n".join(page.extract_text() or "" for page in reader.pages)
     elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         doc = docx.Document(file)
         return "\n".join([para.text for para in doc.paragraphs])
@@ -25,18 +22,20 @@ def extract_text(file):
 
 def add_documents(files):
     global documents
-    all_texts = []
+    texts = []
     for file in files:
-        text = extract_text(file)
-        documents.append(text)
-        all_texts.append(text)
-    embeddings = model.encode(all_texts)
-    index.add(np.array(embeddings))
+        content = extract_text(file)
+        if content:
+            documents.append(content)
+            texts.append(content)
+    if texts:
+        embeddings = model.encode(texts)
+        index.add(np.array(embeddings))
     return "Documents embedded successfully."
 
 def query_rag(question):
     q_embed = model.encode([question])
     D, I = index.search(np.array(q_embed), k=3)
-    retrieved = [documents[i] for i in I[0]]
-    context = "\n".join(retrieved)
-    return f"Answer (context-based):\n{context}\n\n[Mock Answer Here – Connect to LLM]"
+    retrieved = [documents[i] for i in I[0] if i < len(documents)]
+    context = "\n\n".join(retrieved)
+    return f"Answer using top docs:\n\n{context}\n\n(Note: Mock answer here – no actual LLM response)"
