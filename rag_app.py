@@ -1,87 +1,57 @@
 import streamlit as st
+import PyPDF2
+import docx2txt
 import os
-import tempfile
-
 from transformers import pipeline
 from sentence_transformers import SentenceTransformer
 import faiss
-import PyPDF2
-import docx
-import fitz  # PyMuPDF
+import numpy as np
 
-# Load Hugging Face API token
-HF_TOKEN = st.secrets["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"]
-os.environ["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"] = HF_TOKEN
+st.set_page_config(page_title="RAG App", layout="wide")
 
-st.title("📄 Chat with Your Documents (RAG App)")
+st.title("📄 RAG Chatbot: Ask Questions from Your Docs")
 
-# File uploader
-uploaded_files = st.file_uploader("Upload Documents", type=["pdf", "docx", "txt"], accept_multiple_files=True)
+# Hugging Face Model
+HF_TOKEN = st.secrets["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"]
+qa_pipeline = pipeline("question-answering", model="deepset/roberta-base-squad2", token=HF_TOKEN)
 
-# Load models
-@st.cache_resource
-def load_models():
-    embedder = SentenceTransformer('all-MiniLM-L6-v2')
-    rag_pipeline = pipeline("question-answering", model="deepset/roberta-base-squad2", tokenizer="deepset/roberta-base-squad2")
-    return embedder, rag_pipeline
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-embedder, rag_pipeline = load_models()
+uploaded_files = st.file_uploader("Upload PDF/DOCX/TXT files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
 
-# Document parsing
-def parse_file(file):
-    text = ""
+def extract_text(file):
     if file.type == "application/pdf":
-        pdf = fitz.open(stream=file.read(), filetype="pdf")
-        for page in pdf:
-            text += page.get_text()
+        reader = PyPDF2.PdfReader(file)
+        return " ".join([page.extract_text() or "" for page in reader.pages])
     elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
-        doc = docx.Document(file)
-        for para in doc.paragraphs:
-            text += para.text + "\n"
+        return docx2txt.process(file)
     elif file.type == "text/plain":
-        text = file.read().decode()
-    return text
+        return file.read().decode("utf-8")
+    return ""
 
-# Embed documents and build FAISS index
-def build_vector_store(text_chunks):
-    embeddings = embedder.encode(text_chunks)
-    dim = embeddings[0].shape[0]
-    index = faiss.IndexFlatL2(dim)
-    index.add(embeddings)
-    return index, embeddings
+documents = []
+for file in uploaded_files:
+    text = extract_text(file)
+    documents.append(text)
 
-# Chunking helper
-def chunk_text(text, chunk_size=500):
-    words = text.split()
-    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+if documents:
+    full_text = " ".join(documents)
+    # Split into chunks
+    chunks = [full_text[i:i+500] for i in range(0, len(full_text), 500)]
 
-# Process uploaded files
-all_chunks = []
-file_sources = []
-if uploaded_files:
-    for file in uploaded_files:
-        raw_text = parse_file(file)
-        chunks = chunk_text(raw_text)
-        all_chunks.extend(chunks)
-        file_sources.extend([file.name] * len(chunks))
+    # Embedding & FAISS index
+    embeddings = embedder.encode(chunks)
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(np.array(embeddings))
 
-    index, embeddings = build_vector_store(all_chunks)
-    st.success(f"{len(all_chunks)} chunks indexed from {len(uploaded_files)} documents.")
+    st.success("Documents loaded. Ask your question below.")
 
-# Chat interface
-if uploaded_files:
-    query = st.text_input("Ask a question about your documents:")
+    query = st.text_input("Ask a question:")
     if query:
-        query_vec = embedder.encode([query])
-        D, I = index.search(query_vec, k=5)
-        retrieved_docs = [all_chunks[i] for i in I[0]]
+        query_embedding = embedder.encode([query])
+        _, I = index.search(np.array(query_embedding), k=3)
+        context = " ".join([chunks[i] for i in I[0]])
 
-        context = "\n".join(retrieved_docs)
-        result = rag_pipeline(question=query, context=context)
-
-        st.subheader("💬 Answer")
-        st.write(result['answer'])
-
-        with st.expander("🔍 Retrieved Passages"):
-            for passage in retrieved_docs:
-                st.markdown(f"- {passage}")
+        result = qa_pipeline(question=query, context=context)
+        st.subheader("Answer:")
+        st.write(result["answer"])
