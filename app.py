@@ -1,22 +1,23 @@
 import streamlit as st
 from rag_utils import add_documents, query_rag
 
+st.set_page_config(page_title="Chat with Your Documents", layout="centered")
 st.title("📄 Chat with Your Documents using RAG")
 
-# Upload section
-st.header("Step 1: Upload documents")
-files = st.file_uploader("Upload PDF, DOCX, or TXT files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
+st.subheader("Step 1: Upload Documents")
+uploaded_files = st.file_uploader(
+    "Upload PDF, DOCX, or TXT files", type=["pdf", "docx", "txt"], accept_multiple_files=True
+)
 
-if files and st.button("Embed Documents"):
-    with st.spinner("Processing..."):
-        msg = add_documents(files)
+if uploaded_files and st.button("Embed Documents"):
+    with st.spinner("Processing documents..."):
+        msg = add_documents(uploaded_files)
         st.success(msg)
 
-# Query section
-st.header("Step 2: Ask Questions")
-question = st.text_input("Ask a question about your uploaded documents")
+st.subheader("Step 2: Ask a Question")
+user_query = st.text_input("What would you like to know?")
 
-if question:
-    with st.spinner("Thinking..."):
-        response = query_rag(question)
-        st.info(response)
+if user_query:
+    with st.spinner("Searching..."):
+        answer = query_rag(user_query)
+        st.info(answer)
