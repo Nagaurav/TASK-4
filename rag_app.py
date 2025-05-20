@@ -12,7 +12,7 @@ st.set_page_config(page_title="RAG App", layout="wide")
 st.title("📄 RAG Chatbot: Ask Questions from Your Docs")
 
 # Hugging Face Model
-HF_TOKEN = st.secrets["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"]
+HF_TOKEN = st.secrets["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"]
 qa_pipeline = pipeline("question-answering", model="deepset/roberta-base-squad2", token=HF_TOKEN)
 
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
