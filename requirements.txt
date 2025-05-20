@@ -3,5 +3,5 @@ transformers
 sentence-transformers
 faiss-cpu
 python-docx
-PyMuPDF  
+PyMuPDF
 PyPDF2
