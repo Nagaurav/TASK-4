@@ -1,57 +1,79 @@
 import streamlit as st
-import PyPDF2
-import docx2txt
 import os
-from transformers import pipeline
-from sentence_transformers import SentenceTransformer
+import tempfile
+from PyPDF2 import PdfReader
+import docx2txt
+import fitz  # PyMuPDF
 import faiss
-import numpy as np
+from sentence_transformers import SentenceTransformer
+from transformers import pipeline
 
-st.set_page_config(page_title="RAG App", layout="wide")
-
-st.title("📄 RAG Chatbot: Ask Questions from Your Docs")
-
-# Hugging Face Model
+# Load Hugging Face Token securely
 HF_TOKEN = st.secrets["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"]
-qa_pipeline = pipeline("question-answering", model="deepset/roberta-base-squad2", token=HF_TOKEN)
+os.environ["HF_TOKEN"] = HF_TOKEN
 
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+# Load models
+@st.cache_resource
+def load_models():
+    embedder = SentenceTransformer("all-MiniLM-L6-v2")
+    rag_pipeline = pipeline(
+        "text2text-generation", 
+        model="google/flan-t5-base", 
+        tokenizer="google/flan-t5-base",
+        use_auth_token=HF_TOKEN
+    )
+    return embedder, rag_pipeline
 
-uploaded_files = st.file_uploader("Upload PDF/DOCX/TXT files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
+embedder, rag_pipeline = load_models()
 
-def extract_text(file):
+# File handling
+def read_file(file):
     if file.type == "application/pdf":
-        reader = PyPDF2.PdfReader(file)
-        return " ".join([page.extract_text() or "" for page in reader.pages])
+        pdf = PdfReader(file)
+        return "\n".join(page.extract_text() or '' for page in pdf.pages)
     elif file.type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         return docx2txt.process(file)
     elif file.type == "text/plain":
         return file.read().decode("utf-8")
-    return ""
+    else:
+        return ""
 
-documents = []
-for file in uploaded_files:
-    text = extract_text(file)
-    documents.append(text)
-
-if documents:
-    full_text = " ".join(documents)
-    # Split into chunks
-    chunks = [full_text[i:i+500] for i in range(0, len(full_text), 500)]
-
-    # Embedding & FAISS index
+# Index creation
+def create_faiss_index(chunks):
     embeddings = embedder.encode(chunks)
     index = faiss.IndexFlatL2(embeddings.shape[1])
-    index.add(np.array(embeddings))
+    index.add(embeddings)
+    return index, embeddings
 
-    st.success("Documents loaded. Ask your question below.")
+# Split text into chunks
+def chunk_text(text, chunk_size=500):
+    words = text.split()
+    return [" ".join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
 
-    query = st.text_input("Ask a question:")
+# Streamlit UI
+st.title("📄 RAG App: Chat with Your Documents")
+
+uploaded_files = st.file_uploader("Upload PDF, DOCX or TXT files", type=["pdf", "docx", "txt"], accept_multiple_files=True)
+
+if uploaded_files:
+    full_text = ""
+    for file in uploaded_files:
+        full_text += read_file(file) + "\n"
+
+    chunks = chunk_text(full_text)
+    index, embeddings = create_faiss_index(chunks)
+
+    st.success("✅ Documents processed and indexed!")
+
+    query = st.text_input("Ask a question about your documents:")
     if query:
         query_embedding = embedder.encode([query])
-        _, I = index.search(np.array(query_embedding), k=3)
-        context = " ".join([chunks[i] for i in I[0]])
+        D, I = index.search(query_embedding, k=3)
+        relevant_chunks = [chunks[i] for i in I[0]]
+        context = " ".join(relevant_chunks)
+        prompt = f"Context: {context}\n\nQuestion: {query}\nAnswer:"
 
-        result = qa_pipeline(question=query, context=context)
-        st.subheader("Answer:")
-        st.write(result["answer"])
+        with st.spinner("Generating answer..."):
+            answer = rag_pipeline(prompt, max_length=200, do_sample=False)[0]["generated_text"]
+        st.markdown("### 🧠 Answer")
+        st.write(answer)
