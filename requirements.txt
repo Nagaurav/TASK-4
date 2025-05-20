@@ -5,3 +5,4 @@ faiss-cpu==1.7.4
 python-docx
 PyMuPDF
 PyPDF2
+huggingface-hub
