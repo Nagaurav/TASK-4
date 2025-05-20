@@ -8,7 +8,7 @@ import docx
 import os
 
 # Load Hugging Face token securely
-hf_token = st.secrets["hf_token"]
+hf_token = st.secrets["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"]
 
 @st.cache_resource
 def load_model():
